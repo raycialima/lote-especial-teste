@@ -1,0 +1,12 @@
+{
+  "name": "lote-especial-otimizada",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "cheerio": "1.2.0",
+    "lightningcss": "1.33.0",
+    "purgecss": "8.0.0",
+    "sharp": "0.35.4"
+  }
+}
