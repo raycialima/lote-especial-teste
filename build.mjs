@@ -12,11 +12,12 @@ const ASSETS = path.join(OUT, 'assets');
 const SOURCE_FALLBACK = 'https://raw.githubusercontent.com/raycialima/lote-especial-teste/main/index.html';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36';
 const OFFLINE = process.env.OFFLINE === '1';
-const DELAY_TIMEOUT = Number(process.env.DELAY_TIMEOUT || 5000);
+const DELAY_TIMEOUT = Number(process.env.DELAY_TIMEOUT || 15000);
 const VIDEO_TIMEOUT = Number(process.env.VIDEO_TIMEOUT || 5000);
 // Configuração (lp.config.json é opcional)
-let CFG = { vwo: 'sync', vwoTolerance: 500, vwoHideBody: true, criticalSections: 3 };
+let CFG = { vwo: 'sync', vwoTolerance: 500, vwoHideBody: true, criticalSections: 3, fontDisplay: 'swap', preloadFonts: 2 };
 try { CFG = { ...CFG, ...JSON.parse(await fs.readFile('lp.config.json', 'utf8')) }; } catch {}
+try { if (process.env.LP_CONFIG) CFG = { ...CFG, ...JSON.parse(process.env.LP_CONFIG) }; } catch {}
 const VWO_TOLERANCE = CFG.vwoTolerance;
 const log = (...a) => console.log('[build]', ...a);
 
@@ -237,9 +238,10 @@ const purged = await new PurgeCSS().purge({
 let css = purged.map((p) => p.css).join('\n');
 // CSS crítico: só o que as primeiras seções (topo da página) usam
 const $c = cheerio.load(htmlForPurge, { decodeEntities: false });
-const tops = $c('[data-elementor-type="wp-page"] > .e-con, [data-elementor-type="wp-page"] > .elementor-section').toArray();
+const tops = $c('.e-parent, .elementor-top-section').toArray();
 tops.slice(CFG.criticalSections).forEach((el) => $c(el).remove());
 $c('script').remove();
+log('seções no crítico:', CFG.criticalSections, 'de', tops.length, '| ids restantes:', $c('[data-id]').length);
 const crit = await new PurgeCSS().purge({
   content: [{ raw: $c.html(), extension: 'html' }],
   css: [{ raw: css }],
@@ -280,7 +282,7 @@ for (const fam of googleFamilies) {
 }
 const finalize = async (css) => {
 css = fontCss + css;
-css = css.replace(/@font-face\s*\{([^}]*)\}/g, (m, body) => (/font-display/.test(body) ? m : `@font-face{font-display:swap;${body}}`));
+css = css.replace(/@font-face\s*\{([^}]*)\}/g, (m, body) => `@font-face{font-display:${CFG.fontDisplay};${body.replace(/font-display\s*:\s*[\w-]+\s*;?/, '')}}`);
 for (const m of [...css.matchAll(/url\("?(https?:\/\/[^")]+)"?\)/g)]) {
   const u = m[1];
   if (/fonts\.gstatic|stlflix\.com/.test(u)) css = css.split(u).join(await host(u.split('#')[0]));
@@ -296,27 +298,31 @@ log('CSS: crítico', (critCss.length / 1024).toFixed(0), 'KB (inline) | completo
 const fullPath = await writeAsset(Buffer.from(fullCss), '.css');
 const styleTag = `<style id="lp-css">${critCss}</style><link rel="stylesheet" href="${fullPath}" media="print" onload="this.media='all'"><noscript><link rel="stylesheet" href="${fullPath}"></noscript>`;
 if ($('#vwoCode').length) $('#vwoCode').before(styleTag); else $('head').append(styleTag);
-const latinFonts = [...fontCss.matchAll(/\/\*\s*latin\s*\*\/\s*@font-face\s*\{[^}]*font-weight:\s*(\d+)[^}]*url\((\/assets\/[^)]+\.woff2)\)/g)];
-for (const u of [...new Set(latinFonts.filter(([, w]) => w === '700' || w === '600').map((x) => x[2]))].slice(0, 2)) $('head').append(`<link rel="preload" href="${u}" as="font" type="font/woff2" crossorigin>`);
+// preload das fontes latin usadas no topo, logo no início do <head>
+const latinFonts = [...fontCss.matchAll(/\/\*\s*latin\s*\*\/\s*@font-face\s*\{[^}]*font-family:\s*'([^']+)'[^}]*font-weight:\s*(\d+)[^}]*url\((\/assets\/[^)]+\.woff2)\)/g)];
+const critFams = new Set([...critCss.matchAll(/font-family:\s*"?([^",;}]+)/g)].map((m) => m[1].trim().toLowerCase()));
+const pre = [...new Set(latinFonts.filter(([, f]) => critFams.has(f.toLowerCase())).map((x) => x[3]))].slice(0, CFG.preloadFonts);
+log('preload fontes:', pre.length, [...critFams].join('|'));
+$('head').prepend(pre.map((u) => `<link rel="preload" href="${u}" as="font" type="font/woff2" crossorigin>`).join(''));
+$('meta[charset]').remove(); $('head').prepend('<meta charset="UTF-8">');
 // shim: listeners de DOMContentLoaded/load registrados depois desses eventos disparam mesmo assim
 const SHIM = "(function(){var d=document,w=window,da=d.addEventListener.bind(d),wa=w.addEventListener.bind(w);d.addEventListener=function(t,f,o){if(t==='DOMContentLoaded'&&d.readyState!=='loading'){setTimeout(function(){typeof f==='function'?f.call(d,new Event(t)):f.handleEvent(new Event(t))});return}return da(t,f,o)};w.addEventListener=function(t,f,o){if(t==='load'&&d.readyState==='complete'){setTimeout(function(){typeof f==='function'?f.call(w,new Event(t)):f.handleEvent(new Event(t))});return}return wa(t,f,o)};})();";
 const appJs = SHIM + '\n;\n' + appChunks.join('\n;\n').replace(/\/\/# sourceMappingURL=\S+/g, '');
 const appPath = await writeAsset(Buffer.from(appJs), '.js');
-// JS do Elementor carrega só depois da primeira pintura; fundos dos carrosséis depois do load
+// fundos dos carrosséis depois do load (o JS do Elementor entra junto com o tracking, na 1ª interação)
 $('body').append(`<script>
-addEventListener('load',function(){setTimeout(function(){var s=document.createElement('script');s.src='${appPath}';s.async=false;document.body.appendChild(s);},0);});
 addEventListener('load',function(){document.querySelectorAll('[data-lazy-bg]').forEach(function(e){e.style.backgroundImage='url('+e.getAttribute('data-lazy-bg')+')';});});
 </script>`);
 const delayedJson = JSON.stringify(delayed).replace(/<\//g, '<\\/');
 const videoJson = JSON.stringify(video);
 $('body').append(`<script>
 (function(){
-  var T=${delayedJson},V=${videoJson},done=false,vdone=false;
+  var A='${appPath}',T=${delayedJson},V=${videoJson},done=false,vdone=false;
   function run(list,i){ if(i>=list.length) return; var it=list[i],s=document.createElement('script');
     if(it.src){ s.src=it.src; s.async=false; s.onload=s.onerror=function(){run(list,i+1)}; document.head.appendChild(s); }
     else { s.text=it.code; document.head.appendChild(s); run(list,i+1); } }
   function loadVideo(){ if(vdone) return; vdone=true; V.forEach(function(u){var s=document.createElement('script');s.src=u;s.async=true;document.head.appendChild(s);}); }
-  function go(){ if(done) return; done=true; EV.forEach(function(e){removeEventListener(e,go,{passive:true})}); loadVideo(); run(T,0); }
+  function go(){ if(done) return; done=true; EV.forEach(function(e){removeEventListener(e,go,{passive:true})}); loadVideo(); var a=document.createElement('script'); a.src=A; a.onload=a.onerror=function(){run(T,0)}; document.body.appendChild(a); }
   var EV=['pointerdown','touchstart','keydown','scroll','mousemove','wheel'];
   EV.forEach(function(e){addEventListener(e,go,{passive:true})});
   addEventListener('load',function(){ setTimeout(loadVideo,${VIDEO_TIMEOUT}); setTimeout(go,${DELAY_TIMEOUT}); });
